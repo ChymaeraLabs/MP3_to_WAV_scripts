@@ -1,27 +1,57 @@
-from pydub import AudioSegment, effects
-import ffmpeg, json, os
+"""Merge up to three submitted audio files into one mono, loudness-normalized WAV.
 
-#Parse JSON
-jsonPS1 = 'C:\\Apps\\Audio\\data\\ps1Py.json'
-with open(jsonPS1, 'r') as ps1:
-    py = json.load(ps1)
+Python version of MP3toWAV.ps1. Uses only the standard library (Python 3.7+) and calls
+ffmpeg directly, so no pip installs are needed.
 
-#Assign date to Variables, Aud2 and Aud3 may not always contain data
-ls = [py['Aud1'],py['Aud2'],py['Aud3']]
-cmpgnName = (py['cmpgnName'])
+Run from the Power Automate Desktop "Run DOS command" action:
+    "C:\\Path\\To\\python.exe" "C:\\Apps\\Audio\\data\\MP3toWAV.py" "%Audio1%" "%Audio2%" "%Audio3%" "%campaignName%"
 
-#Grab each file provided and convert to WAV
-auds = []
-for index in range(len(ls)):
-    if ls[index] != '':
-        aud=AudioSegment.from_file(f"C:\\*******\\infiles\\{ls[index]}", format=ls[index].split('.')[-1])
-        auds.append(aud)
+Audio2 and Audio3 may be empty strings. Exits non-zero on failure.
+"""
+import os
+import shutil
+import subprocess
+import sys
 
-#Convert to Mono and merge converted files and normalize audio
-outfile = sum(auds)
-outfile = outfile.set_channels(1)
-outfile.export(f"C:\\*******\\outfiles\\{cmpgnName}.wav", format="wav")
+IN_DIR = r"C:\Apps\Audio\infiles"
+OUT_DIR = r"C:\Apps\Audio\outfiles"
+FFMPEG_FALLBACK = r"C:\Apps\Audio\ffmpeg\ffmpeg.exe"  # adjust if ffmpeg lives elsewhere
 
-#Remove files
-os.remove(f"C:\\*******\\infiles\\*.mp3")
-os.remove(f"C:\\*******\\infiles\\*.wav")
+
+def main():
+    if len(sys.argv) != 5:
+        sys.exit('Usage: MP3toWAV.py <Aud1> <Aud2> <Aud3> <CampaignName>')
+    aud1, aud2, aud3, campaign_name = sys.argv[1:]
+
+    ffmpeg = shutil.which("ffmpeg") or FFMPEG_FALLBACK
+
+    # Aud2 and Aud3 may be empty
+    files = [os.path.join(IN_DIR, a) for a in (aud1, aud2, aud3) if a]
+    if not files:
+        sys.exit("No audio files provided.")
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+
+    # One ffmpeg command: convert each input to mono 44.1kHz, join in order, normalize loudness
+    cmd = [ffmpeg, "-y"]
+    for f in files:
+        cmd += ["-i", f]
+
+    n = len(files)
+    prep = ";".join("[%d:a]aresample=44100,aformat=channel_layouts=mono[a%d]" % (i, i) for i in range(n))
+    labels = "".join("[a%d]" % i for i in range(n))
+    flt = "%s;%sconcat=n=%d:v=0:a=1,loudnorm[out]" % (prep, labels, n)
+
+    cmd += ["-filter_complex", flt, "-map", "[out]", os.path.join(OUT_DIR, campaign_name + ".wav")]
+
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        sys.exit("ffmpeg failed with exit code %d" % result.returncode)
+
+    # Only clean up after a successful conversion, and only the files used
+    for f in files:
+        os.remove(f)
+
+
+if __name__ == "__main__":
+    main()
