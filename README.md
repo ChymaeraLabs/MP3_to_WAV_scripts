@@ -4,44 +4,61 @@ Converts audio files submitted through a Microsoft Form into a single mono WAV a
 
 ## Workflow
 
-1. **Power Automate (cloud flow)** starts when the MS Form is submitted. The submitted files go to a SharePoint folder, and the file names are parsed from the form's JSON and passed to Power Automate Desktop.
-2. **Power Automate Desktop (PAD)** syncs the SharePoint folder to `C:\Apps\Audio\infiles` and runs one of the scripts below.
-3. The script joins up to three audio files, in order, into one mono WAV and writes it to `C:\Apps\Audio\outfiles\<campaignName>.wav`.
+1. **Power Automate (cloud flow)** starts when the MS Form is submitted. The submitted files go to a SharePoint folder, and the file names (file-based scripts) or file contents as base64 (base64 scripts) are passed to Power Automate Desktop.
+2. **Power Automate Desktop (PAD)** runs one of the four scripts below.
+3. The script joins up to three audio files, in order, into one mono WAV.
 4. The WAV is uploaded to 3CX.
 
 ## Scripts
 
-Both scripts do the same job. Use whichever runs reliably in your environment.
+All four scripts do the same conversion. There are two input styles, each in PowerShell and Python, so they can be tested against each other.
 
-| Script | Runs with | Notes |
-|---|---|---|
-| `MP3toWAV.ps1` | PAD "Run PowerShell script" | Relaunches itself in PowerShell 7, because ffmpeg won't run from PAD's PowerShell 5, then calls ffmpeg directly. |
-| `MP3toWAV.py` | PAD "Run DOS command" | Python 3.7+, standard library only. Calls ffmpeg directly. |
+| Script | Input | Output | Runs with |
+|---|---|---|---|
+| `MP3toWAV.ps1` | File names | WAV file in `C:\Apps\Audio\outfiles\<campaignName>.wav` | PAD "Run PowerShell script" |
+| `MP3toWAV.py` | File names | WAV file in `C:\Apps\Audio\outfiles\<campaignName>.wav` | PAD "Run DOS command" |
+| `MP3toWAV-base64.ps1` | Base64 audio | Base64 WAV on stdout | PAD "Run PowerShell script" |
+| `MP3toWAV-base64.py` | Base64 audio (stdin) | Base64 WAV on stdout | PAD "Run DOS command" |
 
-Both scripts:
-- take four values: Audio1, Audio2, Audio3 and the campaign name. Audio2 and Audio3 may be empty.
+All scripts:
+- take up to three audio inputs. The second and third may be empty.
 - convert each input to mono at 44.1 kHz, join them in order, and apply `loudnorm` loudness normalization.
-- delete the input files only after a successful conversion, and fail with an error if ffmpeg fails.
+- fail with an error if ffmpeg fails.
 
-### PowerShell
+### File-based (`MP3toWAV.ps1`, `MP3toWAV.py`)
 
-`%Audio1%`, `%Audio2%`, `%Audio3%` and `%campaignName%` in the `param()` block are PAD variables. PAD substitutes them into the script text before it runs. The script passes them to PowerShell 7 as parameters, so no intermediate JSON file is needed.
+Read the files from `C:\Apps\Audio\infiles`, which PAD syncs from the SharePoint folder, so they depend on the sync finishing first. They also take the campaign name, and delete the input files only after a successful conversion.
 
-### Python
+**PowerShell:** `%Audio1%`, `%Audio2%`, `%Audio3%` and `%campaignName%` in the `param()` block are PAD variables. PAD substitutes them into the script text before it runs. The script relaunches itself in PowerShell 7, because ffmpeg won't run from PAD's PowerShell 5, and passes the values along as parameters.
 
-Run it from a PAD "Run DOS command" action, using the full path to a Python 3 install:
+**Python:** run it from a PAD "Run DOS command" action, using the full path to a Python 3 install. Pass empty values as `""`:
 
 ```
 "C:\Path\To\python.exe" "C:\Apps\Audio\data\MP3toWAV.py" "%Audio1%" "%Audio2%" "%Audio3%" "%campaignName%"
 ```
 
-Pass empty values as `""`. Don't use PAD's built-in "Run Python script" action. It uses IronPython 2.7 and can't use installed packages.
+### Base64 (`MP3toWAV-base64.ps1`, `MP3toWAV-base64.py`)
+
+Take the audio content itself, so there's no folder to sync and nothing is read from or written to OneDrive. Each decodes the audio to a temp folder, converts it, returns the merged WAV as one base64 string on stdout, and deletes the temp folder. They don't take a campaign name, so name the file wherever you decode the result.
+
+**PowerShell:** `%Audio1Base64%`, `%Audio2Base64%` and `%Audio3Base64%` in the `param()` block are PAD variables. The PowerShell 5 step pipes them to PowerShell 7 over stdin, because base64 is too long for a command line.
+
+**Python:** reads one base64 audio file per line from stdin, up to three. A command-line argument is too short for base64 and the DOS command action has no stdin field, so have PAD write the values to a local text file outside OneDrive, then:
+
+```
+"C:\Path\To\python.exe" "C:\Apps\Audio\data\MP3toWAV-base64.py" < "C:\Apps\Audio\data\in.txt"
+```
+
+Things to watch:
+- Large strings in PAD variables, script text and captured output may be slow or fail at some size. Test with the largest realistic submission.
+- The scripts expect plain base64. Strip any `data:audio/...;base64,` prefix first.
+- Don't use PAD's built-in "Run Python script" action. It uses IronPython 2.7 and can't use installed packages.
 
 ## Requirements
 
 - ffmpeg, either on PATH or at `C:\Apps\Audio\ffmpeg\ffmpeg.exe`. Edit the fallback path in the script if it lives elsewhere.
-- PowerShell 7 at `C:\Program Files\PowerShell\7\pwsh.exe` for the PowerShell script.
-- Python 3.7+ for the Python script.
+- PowerShell 7 at `C:\Program Files\PowerShell\7\pwsh.exe` for the PowerShell scripts.
+- Python 3.7+ for the Python scripts. Standard library only.
 
 ## Notes
 
