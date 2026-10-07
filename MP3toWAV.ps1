@@ -1,33 +1,55 @@
-$psVersion=(Get-Host).Version.Major
-if ($psVersion -ne 7) {
-    $processInfo=New-Object System.Diagnostics.ProcessStartInfo
-    $processInfo.FileName="C:\Program Files\PowerShell\7\pwsh.exe"
-    $processInfo.RedirectStandardError=$true
-    $processInfo.RedirectStandardOutput=$true
-    $processInfo.UseShellExecute=$false
-    $processInfo.Arguments=$MyInvocation.MyCommand.Definition
-        $process=New-Object System.Diagnostics.Process
-        $process.StartInfo=$processInfo
-        $process.Start() | Out-Null
-        $process.WaitForExit()
-        $stdout=$process.StandardOutput.ReadToEnd()
-            Write-Host $stdout
-}else{
-    param($Aud1,$Aud2,$Aud3,$cmpgnName,$scrptPath)
-        $Aud1="%Audio1%"
-        $Aud2="%Audio2%"
-        $Aud3="%Audio3%"
-        $cmpgnName="%campaignName%"
-        $scrptPath='C:\*******'
-#Create JSON
-    $JSON=New-Object -TypeName pscustomobject -Property @{
-        Aud1=$Aud1
-        Aud2=$Aud2
-        Aud3=$Aud3
-        cmpgnName=$cmpgnName
-    }
-    $JSON | ConvertTo-Json -Depth 4 | Out-File "$scrptPath\ps1Py.json"
-#Launch Python3
-    Set-Location -Path $scrptPath
-        python MP3-WAV.py
+param(
+    [string]$Aud1 = "%Audio1%",
+    [string]$Aud2 = "%Audio2%",
+    [string]$Aud3 = "%Audio3%",
+    [string]$CampaignName = "%campaignName%"
+)
+
+#Power Automate Desktop runs this in Windows PowerShell 5, which can't run ffmpeg.
+#Relaunch in PowerShell 7, passing the values along as parameters (no JSON needed).
+IF($PSVersionTable.PSVersion.Major -lt 7){
+    $self = IF($PSCommandPath){
+                $PSCommandPath
+            }else{
+                $MyInvocation.MyCommand.Definition
+            }
+    & "C:\Program Files\PowerShell\7\pwsh.exe" `
+    -NoProfile -ExecutionPolicy Bypass -File $self -Aud1 $Aud1 -Aud2 $Aud2 -Aud3 $Aud3 -CampaignName $CampaignName
+    exit $LASTEXITCODE
 }
+
+$inDir = 'C:\Apps\Audio\infiles'
+$outDir = 'C:\Apps\Audio\outfiles'
+$ffmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
+IF(-not $ffmpeg){
+    $ffmpeg = 'C:\Apps\Audio\ffmpeg\ffmpeg.exe'   #Adjust if ffmpeg lives elsewhere
+}
+
+#Aud2 and Aud3 may be empty
+$files = @($Aud1, $Aud2, $Aud3) | Where-Object {$_} | ForEach-Object {Join-Path $inDir $_}
+IF(-not $files){
+    throw 'No audio files provided.'
+}
+
+New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+#Build one ffmpeg command: convert each input to mono 44.1kHz, join in order, normalize loudness
+$ffArgs=@('-y')
+foreach($f in $files){
+    $ffArgs += '-i', $f
+}
+
+$n = $files.Count
+$prep = (0..($n - 1) | ForEach-Object {"[${_}:a]aresample=44100,aformat=channel_layouts=mono[a$_]"}) -join ';'
+$labels = (0..($n - 1) | ForEach-Object {"[a$_]"}) -join ''
+$filter = "$prep;${labels}concat=n=${n}:v=0:a=1,loudnorm[out]"
+
+$ffArgs += '-filter_complex', $filter, '-map', '[out]', (Join-Path $outDir "$CampaignName.wav")
+
+& $ffmpeg @ffArgs
+IF($LASTEXITCODE -ne 0){
+    throw "ffmpeg failed with exit code $LASTEXITCODE"
+}
+
+# Only clean up after a successful conversion, and only the files used
+$files | Remove-Item -Force
